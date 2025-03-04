@@ -71,6 +71,9 @@ public:
     std::unordered_set<sstables::shared_sstable> fully_expired_sstables(const std::vector<sstables::shared_sstable>& sstables, gc_clock::time_point query_time) const override {
         return sstables::get_fully_expired_sstables(*this, sstables, query_time);
     }
+    std::unordered_set<sstables::shared_sstable> ttt_expired_sstables(const std::vector<sstables::shared_sstable>& sstables, gc_clock::time_point query_time) const override {
+        return sstables::get_ttt_expired_sstables(*this, sstables, query_time);
+    }
     const std::vector<sstables::shared_sstable>& compacted_undeleted_sstables() const noexcept override {
         return _compacted_undeleted;
     }
@@ -170,18 +173,12 @@ namespace sstables {
 
 std::vector<db::object_storage_endpoint_param> make_storage_options_config(const data_dictionary::storage_options& so) {
     std::vector<db::object_storage_endpoint_param> endpoints;
-    std::visit(overloaded_functor {
-        [] (const data_dictionary::storage_options::local& loc) mutable -> void {
-        },
-        [&endpoints] (const data_dictionary::storage_options::s3& os) mutable -> void {
-            endpoints.emplace_back(os.endpoint, 
-                s3::endpoint_config {
-                .port = std::stoul(tests::getenv_safe("S3_SERVER_PORT_FOR_TEST")),
-                .use_https = ::getenv("AWS_DEFAULT_REGION") != nullptr,
-                .region = ::getenv("AWS_DEFAULT_REGION") ? : "local",
-            });
-        }
-    }, so.value);
+    endpoints.emplace_back("s3.us-east-2.amazonaws.com", 
+        s3::endpoint_config {
+        .port = std::stoul(tests::getenv_safe("S3_SERVER_PORT_FOR_TEST")),
+        .use_https = ::getenv("AWS_DEFAULT_REGION") != nullptr,
+        .region = ::getenv("AWS_DEFAULT_REGION") ? : "local",
+    });
     return endpoints;
 }
 
@@ -316,6 +313,7 @@ public:
 };
 
 future<> test_env::do_with_async(noncopyable_function<void (test_env&)> func, test_env_config cfg) {
+<<<<<<< HEAD
     if (!cfg.storage.is_local_type()) {
         auto db_cfg = make_shared<db::config>();
         db_cfg->experimental_features({db::experimental_features_t::feature::KEYSPACE_STORAGE_OPTIONS});
@@ -334,7 +332,19 @@ future<> test_env::do_with_async(noncopyable_function<void (test_env&)> func, te
 
     return seastar::async([func = std::move(func), cfg = std::move(cfg)] () mutable {
         test_env env(std::move(cfg));
+=======
+    auto db_cfg = make_shared<db::config>();
+    db_cfg->experimental_features({db::experimental_features_t::feature::KEYSPACE_STORAGE_OPTIONS});
+    db_cfg->object_storage_config.set(make_storage_options_config(cfg.storage));
+    return seastar::async([func = std::move(func), cfg = std::move(cfg), db_cfg = std::move(db_cfg)] () mutable {
+        sharded<sstables::storage_manager> sstm;
+        sstm.start(std::ref(*db_cfg), sstables::storage_manager::config{}).get();
+        auto stop_sstm = defer([&] { sstm.stop().get(); });
+        test_env env(std::move(cfg), &sstm.local());
+>>>>>>> 99ddd17cd3 (POC code on how to hook into twcs code to tier)
         auto close_env = defer([&] { env.stop().get(); });
+        env.manager().plug_sstables_registry(std::make_unique<mock_sstables_registry>());
+        auto unplu = defer([&env] { env.manager().unplug_sstables_registry(); });
         func(env);
     });
 }

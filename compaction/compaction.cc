@@ -53,6 +53,9 @@
 #include "tombstone_gc.hh"
 #include "replica/database.hh"
 #include "timestamp.hh"
+#include "utils/s3/client_fwd.hh"
+#include "utils/s3/client.hh"
+#include "db/config.hh"
 
 namespace sstables {
 
@@ -776,9 +779,30 @@ private:
         return _tombstone_gc_state_with_commitlog_check_disabled ? _tombstone_gc_state_with_commitlog_check_disabled.value() : _table_s.get_tombstone_gc_state();
     }
 
+    future<> upload_sstables_to_object_storage(std::unordered_set<sstables::shared_sstable> sstables_to_tier) {
+        gate uploads;
+        auto client = _table_s.get_sstables_manager().get_endpoint_client("s3.us-east-2.amazonaws.com");
+        s3::upload_progress progress = {};
+        for (auto& sst : sstables_to_tier) {
+            auto components = sst->component_filenames();
+
+            for (auto& c : components) {
+                co_await coroutine::maybe_yield();
+                auto path = std::filesystem::path(c);
+                auto gh = uploads.hold();
+
+
+                auto destination = fmt::format("/{}/{}/{}", "rbindar", "uploaded_sstables", path.filename().native());
+                std::ignore = client->upload_file(path, destination, progress, &_cdata.abort).finally([gh = std::move(gh)] {});
+            }
+        }
+        co_await uploads.close();
+    }
+
     future<> setup() {
         auto ssts = make_lw_shared<sstables::sstable_set>(make_sstable_set_for_input());
         auto fully_expired = _table_s.fully_expired_sstables(_sstables, gc_clock::now());
+        auto sstables_ready_to_tier = _table_s.ttt_expired_sstables(_sstables, gc_clock::now());
         min_max_tracker<api::timestamp_type> timestamp_tracker;
 
         double sum_of_estimated_droppable_tombstone_ratio = 0;
@@ -798,6 +822,10 @@ private:
             // dropped without resurrecting old data.
             if (tombstone_expiration_enabled() && fully_expired.contains(sst)) {
                 log_debug("Fully expired sstable {} will be dropped on compaction completion", sst->get_filename());
+                continue;
+            }
+            if (sstables_ready_to_tier.contains(sst)) {
+                log_debug("TTT-expired sstable {} will be uploaded to object storage and its local copy will be dropped on compaction completion", sst->get_filename());
                 continue;
             }
             _stats_collector.update(sst->get_encoding_stats_for_compaction());
@@ -828,6 +856,9 @@ private:
 
         _ms_metadata.min_timestamp = timestamp_tracker.min();
         _ms_metadata.max_timestamp = timestamp_tracker.max();
+
+        // Upload to object storage the sstables that are ready to be tiered
+        co_await upload_sstables_to_object_storage(sstables_ready_to_tier);
     }
 
     // This consumer will perform mutation compaction on producer side using
@@ -2006,6 +2037,28 @@ get_fully_expired_sstables(const table_state& table_s, const std::vector<sstable
         }
     }
     clogger.debug("Checking droppable sstables in {}.{}, candidates={}", table_s.schema()->ks_name(), table_s.schema()->cf_name(), candidates.size());
+    return candidates;
+}
+
+std::unordered_set<sstables::shared_sstable>
+get_ttt_expired_sstables(const table_state& table_s, const std::vector<sstables::shared_sstable>& compacting, gc_clock::time_point compaction_time) {
+    using namespace std::chrono;
+
+    clogger.debug("Checking sstables to tier in {}.{}", table_s.schema()->ks_name(), table_s.schema()->cf_name());
+
+    std::unordered_set<sstables::shared_sstable> candidates;
+    auto ttt = const_cast<table_state&>(table_s).get_sstables_manager().config().time_to_tier_seconds();
+    if (!ttt) {
+        return candidates;
+    }
+    
+    for (auto& candidate : compacting) {
+        if (candidate->get_stats_metadata().max_timestamp + duration_cast<microseconds>(seconds(ttt)).count() < gc_clock::as_int32(compaction_time)) {
+            clogger.debug("Adding candidate of generation {} to list of possibly tiered sstables", candidate->generation());
+            candidates.insert(candidate);
+        }
+    }
+
     return candidates;
 }
 

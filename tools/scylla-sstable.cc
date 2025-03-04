@@ -957,6 +957,7 @@ public:
     virtual const sstables::sstable_set& maintenance_sstable_set() const override { return _maintenance_set; }
     lw_shared_ptr<const sstables::sstable_set> sstable_set_for_tombstone_gc() const override { return make_lw_shared<const sstables::sstable_set>(main_sstable_set()); }
     virtual std::unordered_set<sstables::shared_sstable> fully_expired_sstables(const std::vector<sstables::shared_sstable>& sstables, gc_clock::time_point compaction_time) const override { return {}; }
+    virtual std::unordered_set<sstables::shared_sstable> ttt_expired_sstables(const std::vector<sstables::shared_sstable>& sstables, gc_clock::time_point compaction_time) const override { return {}; }
     virtual const std::vector<sstables::shared_sstable>& compacted_undeleted_sstables() const noexcept override { return _compacted_undeleted_sstables; }
     virtual sstables::compaction_strategy& get_compaction_strategy() const noexcept override { return _compaction_strategy; }
     virtual compaction_strategy_state& get_compaction_strategy_state() noexcept override { return _compaction_strategy_state; }

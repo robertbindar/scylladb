@@ -1733,6 +1733,7 @@ SEASTAR_TEST_CASE(time_window_strategy_correctness_test) {
             auto mut = make_insert(std::move(key), t);
             sstables.push_back(make_sstable_containing(env.make_sstable(s), {std::move(mut)}));
         }
+
         // Decrement the timestamp to simulate a timestamp in the past hour
         for (api::timestamp_type t = 3; t < 5; t++) {
             // And add progressively more cells into each sstable
@@ -6144,6 +6145,62 @@ SEASTAR_TEST_CASE(splitting_compaction_test) {
         };
         BOOST_REQUIRE_THROW(cm.maybe_split_sstable(input, t.as_table_state(), compaction_type_options::split{throwing_classifier}).get(),
                             std::runtime_error);
+    });
+}
+
+SEASTAR_TEST_CASE(time_window_strategy_tiering_test) {
+    using namespace std::chrono;
+
+    return test_env::do_with_async([] (test_env& env) {
+        auto builder = schema_builder("tests", "time_window_strategy")
+                .with_column("id", utf8_type, column_kind::partition_key)
+                .with_column("value", int32_type);
+        builder.set_compaction_strategy(sstables::compaction_strategy_type::time_window);
+        auto s = builder.build();
+
+        auto sst_gen = env.make_sst_factory(s);
+
+        auto make_insert = [&] (partition_key key, api::timestamp_type t) {
+            mutation m(s, key);
+            m.set_clustered_cell(clustering_key::make_empty(), bytes("value"), data_value(int32_t(1)), t);
+            return m;
+        };
+
+        std::map<sstring, sstring> options;
+        time_window_compaction_strategy twcs(options);
+        std::map<api::timestamp_type, std::vector<shared_sstable>> buckets; // windows
+        auto window_size = duration_cast<seconds>(hours(1));
+
+        auto add_new_sstable_to_bucket = [&] (api::timestamp_type ts, api::timestamp_type window_ts) {
+            auto key = partition_key::from_exploded(*s, {to_bytes("key" + to_sstring(ts))});
+            auto mut = make_insert(std::move(key), ts);
+            auto sst = make_sstable_containing(sst_gen, {std::move(mut)});
+            auto bound = time_window_compaction_strategy::get_window_lower_bound(window_size, window_ts);
+            buckets[bound].push_back(std::move(sst));
+        };
+
+        auto cf = env.make_table_for_tests(s);
+        auto close_cf = deferred_stop(cf);
+
+        api::timestamp_type current_window_ts = api::timestamp_clock::now().time_since_epoch().count();
+
+        auto now = time_window_compaction_strategy::get_window_lower_bound(window_size, current_window_ts);
+
+        add_new_sstable_to_bucket(0, current_window_ts);
+        add_new_sstable_to_bucket(1, current_window_ts);
+        add_new_sstable_to_bucket(now, current_window_ts);
+        add_new_sstable_to_bucket(now, current_window_ts);
+
+        auto control = make_strategy_control_for_test(false);
+
+        // A sealed time window which has less than min_threshold SSTables can be major compacted
+        auto bucket = twcs.newest_bucket(cf.as_table_state(), *control, buckets, 4, 32, now);
+
+        auto desc = get_sstables_for_compaction(twcs, cf.as_table_state(), bucket);
+
+        auto ret = compact_sstables(env, desc, cf, sst_gen).get();
+        BOOST_REQUIRE(ret.new_sstables.empty());
+        BOOST_REQUIRE(ret.stats.end_size == 0);
     });
 }
 
