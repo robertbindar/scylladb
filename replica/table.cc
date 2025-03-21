@@ -2336,6 +2336,9 @@ public:
     std::unordered_set<sstables::shared_sstable> fully_expired_sstables(const std::vector<sstables::shared_sstable>& sstables, gc_clock::time_point query_time) const override {
         return sstables::get_fully_expired_sstables(*this, sstables, query_time);
     }
+    std::unordered_set<sstables::shared_sstable> ttt_expired_sstables(const std::vector<sstables::shared_sstable>& sstables, gc_clock::time_point query_time) const override {
+        return sstables::get_ttt_expired_sstables(*this, sstables, query_time);
+    }
     const std::vector<sstables::shared_sstable>& compacted_undeleted_sstables() const noexcept override {
         return _cg.compacted_undeleted_sstables();
     }

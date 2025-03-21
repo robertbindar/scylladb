@@ -546,6 +546,8 @@ public:
 
     named_value<bool> enable_create_table_with_compact_storage;
 
+    named_value<uint32_t> time_to_tier_seconds;
+
     static const sstring default_tls_priority;
 private:
     template<typename T>
