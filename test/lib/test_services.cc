@@ -313,35 +313,15 @@ public:
 };
 
 future<> test_env::do_with_async(noncopyable_function<void (test_env&)> func, test_env_config cfg) {
-<<<<<<< HEAD
-    if (!cfg.storage.is_local_type()) {
-        auto db_cfg = make_shared<db::config>();
-        db_cfg->experimental_features({db::experimental_features_t::feature::KEYSPACE_STORAGE_OPTIONS});
-        db_cfg->object_storage_endpoints(make_storage_options_config(cfg.storage));
-        return seastar::async([func = std::move(func), cfg = std::move(cfg), db_cfg = std::move(db_cfg)] () mutable {
-            sharded<sstables::storage_manager> sstm;
-            sstm.start(std::ref(*db_cfg), sstables::storage_manager::config{}).get();
-            auto stop_sstm = defer([&] { sstm.stop().get(); });
-            test_env env(std::move(cfg), &sstm.local());
-            auto close_env = defer([&] { env.stop().get(); });
-            env.manager().plug_sstables_registry(std::make_unique<mock_sstables_registry>());
-            auto unplu = defer([&env] { env.manager().unplug_sstables_registry(); });
-            func(env);
-        });
-    }
-
-    return seastar::async([func = std::move(func), cfg = std::move(cfg)] () mutable {
-        test_env env(std::move(cfg));
-=======
     auto db_cfg = make_shared<db::config>();
     db_cfg->experimental_features({db::experimental_features_t::feature::KEYSPACE_STORAGE_OPTIONS});
-    db_cfg->object_storage_config.set(make_storage_options_config(cfg.storage));
+    db_cfg->object_storage_endpoints(make_storage_options_config(cfg.storage));
+
     return seastar::async([func = std::move(func), cfg = std::move(cfg), db_cfg = std::move(db_cfg)] () mutable {
         sharded<sstables::storage_manager> sstm;
         sstm.start(std::ref(*db_cfg), sstables::storage_manager::config{}).get();
         auto stop_sstm = defer([&] { sstm.stop().get(); });
         test_env env(std::move(cfg), &sstm.local());
->>>>>>> 99ddd17cd3 (POC code on how to hook into twcs code to tier)
         auto close_env = defer([&] { env.stop().get(); });
         env.manager().plug_sstables_registry(std::make_unique<mock_sstables_registry>());
         auto unplu = defer([&env] { env.manager().unplug_sstables_registry(); });

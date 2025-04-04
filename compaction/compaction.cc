@@ -56,6 +56,7 @@
 #include "utils/s3/client_fwd.hh"
 #include "utils/s3/client.hh"
 #include "db/config.hh"
+#include "sstables/sstable_version.hh"
 
 namespace sstables {
 
@@ -784,16 +785,17 @@ private:
         auto client = _table_s.get_sstables_manager().get_endpoint_client("s3.us-east-2.amazonaws.com");
         s3::upload_progress progress = {};
         for (auto& sst : sstables_to_tier) {
-            auto components = sst->component_filenames();
+            for (auto c : sstable_version_constants::get_component_map(sst->get_version()) | std::views::keys) {
+                if (sst->has_component(c)) {
+                    co_await coroutine::maybe_yield();
+                    auto path = std::filesystem::path(sst->filename(c).format());
+                    auto gh = uploads.hold();
 
-            for (auto& c : components) {
-                co_await coroutine::maybe_yield();
-                auto path = std::filesystem::path(c);
-                auto gh = uploads.hold();
 
+                    auto destination = fmt::format("/{}/{}/{}", "rbindar", "uploaded_sstables", path.filename().native());
 
-                auto destination = fmt::format("/{}/{}/{}", "rbindar", "uploaded_sstables", path.filename().native());
-                std::ignore = client->upload_file(path, destination, progress, &_cdata.abort).finally([gh = std::move(gh)] {});
+                    std::ignore = client->upload_file(path, destination, progress, &_cdata.abort).finally([gh = std::move(gh)] {});
+                }
             }
         }
         co_await uploads.close();
