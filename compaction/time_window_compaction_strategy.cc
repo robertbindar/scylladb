@@ -360,6 +360,13 @@ time_window_compaction_strategy::get_sstables_for_compaction(table_state& table_
         clogger.debug("[{}] TWCS skipping check for fully expired SSTables", fmt::ptr(this));
     }
 
+    // Get sstables among compaction candidates that 
+    auto sstables_to_tier = table_s.ttt_expired_sstables(candidates, compaction_time);
+    if (!sstables_to_tier.empty()) {
+        clogger.debug("[{}] Going to upload {} sstables that are ready for tiering", fmt::ptr(this), sstables_to_tier.size());
+        return compaction_descriptor(std::vector<shared_sstable>(sstables_to_tier.begin(), sstables_to_tier.end()));
+    }
+
     auto compaction_candidates = get_next_non_expired_sstables(table_s, control, std::move(candidates), compaction_time);
     clogger.debug("[{}] Going to compact {} non-expired sstables", fmt::ptr(this), compaction_candidates.size());
     return compaction_descriptor(std::move(compaction_candidates));

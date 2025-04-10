@@ -514,6 +514,10 @@ public:
         return *_storage;
     }
 
+    component_name filename(component_type f) const {
+        return component_name(*this, f);
+    }
+
 private:
     friend struct component_name;
     friend class sstable_stream_sink_impl;
@@ -522,10 +526,6 @@ private:
     friend class tiered_storage;
 
     const size_t sstable_buffer_size;
-
-    component_name filename(component_type f) const {
-        return component_name(*this, f);
-    }
 
     std::unordered_set<component_type, enum_hash<component_type>> _recognized_components;
     std::vector<sstring> _unrecognized_components;
