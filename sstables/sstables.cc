@@ -1424,7 +1424,7 @@ future<> sstable::create_data() noexcept {
     file_open_options opt;
     opt.extent_allocation_size_hint = 32 << 20;
     opt.sloppy_size = true;
-    opt.sloppy_size_hint = 1ul << 40; // 1TB
+    opt.sloppy_size_hint = 50 << 30; // 50GB
     return open_or_create_data(oflags, std::move(opt)).then([this, oflags] {
         _open_mode.emplace(oflags);
     });
