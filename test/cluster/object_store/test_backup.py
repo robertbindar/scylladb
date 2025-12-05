@@ -21,6 +21,7 @@ from test.pylib.rest_client import read_barrier
 from test.pylib.util import unique_name, wait_for_first_completed
 from cassandra.query import SimpleStatement              # type: ignore # pylint: disable=no-name-in-module
 from collections import defaultdict
+import statistics
 
 logger = logging.getLogger(__name__)
 
@@ -662,8 +663,8 @@ async def check_data_is_back(manager, logger, cql, ks, cf, keys, servers, topolo
         servers_by_host_id[host] = s
 
     logger.info(f'Validate streaming directions')
-    streamed_to = defaultdict(int)
     for s in servers:
+        streamed_to = defaultdict(int)
         log, mark = log_marks[s.server_id]
         res = await log.grep(r'sstables_loader - load_and_stream:.*target_node=(?P<target_host_id>[0-9a-f-]+)', from_mark=mark)
         for r in res:
@@ -679,21 +680,32 @@ async def check_data_is_back(manager, logger, cql, ks, cf, keys, servers, topolo
                 assert target_host_id == str(host_ids[s.server_id])
             streamed_to[target_host_id] += 1
 
-    # validate balance only when rf == #racks
-    if topology.rf < topology.racks:
-        return
+        # validate balance only when rf == #racks
+        if topology.rf != topology.racks:
+            logger.info(f'Skipping balance checks since rf != racks ({topology.rf} != {topology.racks})')
+            continue
 
-    if scope == 'all':
-        assert set(streamed_to.keys()) == set(host_ids.values())
-    elif scope == 'dc':
-        for dc, hosts in host_ids_per_dc.items():
-            streamed_to_in_dc = set([h for h in streamed_to if servers_by_host_id[h].datacenter == dc])
-            assert streamed_to_in_dc == set(hosts)
-    elif scope == 'rack':
-        for dc, racks in host_ids_per_dc_rack.items():
-            for rack, hosts in racks.items():
-                streamed_to_in_rack = set([h for h in streamed_to if servers_by_host_id[h].datacenter == dc and servers_by_host_id[h].rack == rack])
-                assert streamed_to_in_rack == set(hosts)
+        if scope == 'all':
+            assert set(streamed_to.keys()).issubset(set(host_ids.values()))
+            assert len(streamed_to) == topology.rf * topology.dcs
+        elif scope == 'dc':
+            # it's guaranteed the node replicated only within the datacenter by asserts above
+            assert set(streamed_to.keys()).issubset(set(host_ids_per_dc[s.datacenter]))
+            assert len(streamed_to) == topology.rf
+        elif scope == 'rack' and topology.rf == topology.racks:
+            assert set(streamed_to.keys()).issubset(set(host_ids_per_dc_rack[s.datacenter][s.rack]))
+            assert len(streamed_to) == 1
+
+        # asses balance
+        streamed_to_counts = streamed_to.values()
+        assert len(streamed_to_counts) > 0
+        mean_count = statistics.mean(streamed_to_counts)
+        max_deviation = max(abs(count - mean_count) for count in streamed_to_counts)
+        if not primary_replica_only:
+            assert max_deviation == 0, f'if primary_replica_only is False, streaming should be perfectly balanced: {streamed_to}'
+            continue
+
+        assert max_deviation < 0.1 * mean_count, f'node {s.ip_addr} streaming to primary replicas was unbalanced: {streamed_to}'
 
 async def do_restore_server(ks, cf, s, toc_names, scope, prefix, object_storage, manager, logger, primary_replica_only):
     logger.info(f'Restore {s.ip_addr} with {toc_names}, scope={scope}')
@@ -708,44 +720,37 @@ async def do_restore(ks, cf, servers, topology, sstables, scope, prefix, object_
     rf_rack_valid = topology.rf == topology.racks
     if scope == 'all' or scope == 'dc' or not rf_rack_valid:
         sstables_per_dc = defaultdict(list)
-        for s, sstables in sstables.items():
-            sstables_per_dc[s.datacenter].extend(sstables)
+        for s, sstables_list in sstables.items():
+            sstables_per_dc[s.datacenter].extend(sstables_list)
         servers_per_dc = defaultdict(list)
         for s in servers:
             servers_per_dc[s.datacenter].append(s)
-        for dc, sstables in sstables_per_dc.items():
-            batch_size = (len(sstables) + len(servers_per_dc[dc]) - 1) // len(servers_per_dc[dc])
-            assert batch_size * len(servers_per_dc[dc]) >= len(sstables)
-            i = 0
+        
+        for dc, sstables_in_dc in sstables_per_dc.items():
             for s in servers_per_dc[dc]:
                 if scope == 'node':
                     # If not rf_rack_valid, each node should restore data from all sstables in the DC
                     # Otherwise, as done in the case below, each node restore data from all sstables in its rack
                     # (since it is ensured that every rack has a replica of each mutation)
-                    sstables_per_server[s] = sstables
+                    sstables_per_server[s] = sstables_in_dc
                 else:
-                    sstables_per_server[s] = sstables[i * batch_size:(i+1) * batch_size]
-                    i += 1
+                    sstables_per_server[s] = sstables[s]
     elif scope == 'rack' or scope == 'node':
         servers_per_dc_rack = dict()
         sstables_per_dc_rack = dict()
-        for s, sstables in sstables.items():
+        for s, sstables_list in sstables.items():
             servers_per_dc_rack.setdefault(s.datacenter, defaultdict(list))[s.rack].append(s)
-            sstables_per_dc_rack.setdefault(s.datacenter, defaultdict(list))[s.rack].extend(sstables)
-        for dc, racks in sstables_per_dc_rack.items():
-            for rack, sstables in racks.items():
+            sstables_per_dc_rack.setdefault(s.datacenter, defaultdict(list))[s.rack].extend(sstables_list)
+        for dc, racks in sstables_per_dc_rack.items(): 
+            for rack, sstables_in_rack in racks.items():
                 if scope == 'rack':
                     assert topology.rf == topology.racks
-                    batch_size = (len(sstables) + len(servers_per_dc_rack[dc][rack]) - 1) // len(servers_per_dc_rack[dc][rack])
-                    assert batch_size * len(servers_per_dc_rack[dc][rack]) >= len(sstables)
-                    i = 0
                     for s in servers_per_dc_rack[dc][rack]:
-                        sstables_per_server[s] = sstables[i * batch_size:(i+1) * batch_size]
-                        i += 1
+                        sstables_per_server[s] = sstables[s]
                 else:
                     assert scope == 'node'
                     for s in servers_per_dc_rack[dc][rack]:
-                        sstables_per_server[s] = sstables
+                        sstables_per_server[s] = sstables_in_rack
     else:
         raise f"do_restore: {scope=} not supported"
     await asyncio.gather(*(do_restore_server(ks, cf, s, sstables, scope, prefix, object_storage, manager, logger, primary_replica_only) for s, sstables in sstables_per_server.items()))
@@ -801,7 +806,7 @@ async def mark_all_logs(manager, servers):
         (topo(rf = 1, nodes = 4, racks = 2, dcs = 1), True),
         (topo(rf = 3, nodes = 6, racks = 2, dcs = 1), False),
         (topo(rf = 3, nodes = 6, racks = 3, dcs = 1), True),
-        (topo(rf = 2, nodes = 8, racks = 4, dcs = 2), True)
+        (topo(rf = 2, nodes = 8, racks = 4, dcs = 2), False)
     ])
 
 async def test_restore_with_streaming_scopes(manager: ManagerClient, object_storage, topology_rf_validity):
