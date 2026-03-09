@@ -668,10 +668,16 @@ async def mark_all_logs(manager, servers):
         log_marks[s.server_id] = (log, await log.mark())
     return log_marks
 
-def create_schema(ks, cf, min_tablet_count=None):
+def create_schema(ks, cf, min_tablet_count=None, max_tablet_count=None):
     schema = f"CREATE TABLE {ks}.{cf} ( pk text primary key, value int )"
+    tablet_opts = {}
     if min_tablet_count is not None:
-        schema += f" WITH tablets = {{'min_tablet_count': {min_tablet_count}}}"
+        tablet_opts['min_tablet_count'] = min_tablet_count
+    if max_tablet_count is not None:
+        tablet_opts['max_tablet_count'] = max_tablet_count
+    if tablet_opts:
+        opts = ", ".join(f"'{k}': {v}" for k, v in tablet_opts.items())
+        schema += f" WITH tablets = {{{opts}}}"
     schema += ';'
     return schema
 
@@ -801,7 +807,6 @@ async def test_restore_tablets(build_mode: str, manager: ManagerClient, object_s
         assert (status is not None) and (status['state'] == 'done')
 
         await check_mutation_replicas(cql, manager, servers, range(num_keys), topology, logger, ks, 'test')
-
 
 @pytest.mark.asyncio
 @pytest.mark.skip_mode(mode='release', reason='error injections are not supported in release mode')
