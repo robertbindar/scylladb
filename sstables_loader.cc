@@ -1075,6 +1075,11 @@ static future<size_t> process_manifest(input_stream<char>& is, sstring keyspace,
     auto rack = rjson::to_sstring(parsed["node"]["rack"]);
 
     // Process each sstable entry in the manifest
+    // It's possible that the manifest does not contain any sstable entry, for example when the snapshot is taken on an empty tablet,
+    // in that case just skip the insertion to system_distributed.snapshot_sstables and return
+    if (!parsed.HasMember("sstables")) {
+        co_return tablet_count;
+    }
     // FIXME: cleanup of the snapshot-related rows is needed in case anything throws in here.
     auto sstables = rjson::find(parsed, "sstables");
     if (!sstables) {
