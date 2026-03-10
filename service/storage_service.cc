@@ -5263,6 +5263,14 @@ future<> storage_service::restore_tablets(table_id table, sstring snap_name, sst
     // the tablet map cannot split and merge and, thus, the static vector of tokens should
     // map to correct tablet boundaries throughout the whole operation
     utils::chunked_vector<std::pair<locator::tablet_id, dht::token>> tablets;
+
+    auto wait_transitions_done = [this] (locator::global_tablet_id gid) -> future<> {
+        co_await _topology_state_machine.event.wait([this, gid] {
+            auto& tmap = get_token_metadata().tablets().get_tablet_map(gid.table);
+            return !tmap.get_tablet_transition_info(gid.tablet);
+        });
+    };
+
     {
         const auto tm = get_token_metadata_ptr();
         const auto& tmap = tm->tablets().get_tablet_map(table);
@@ -5277,22 +5285,35 @@ future<> storage_service::restore_tablets(table_id table, sstring snap_name, sst
     co_await coroutine::parallel_for_each(tablets, [&] (const auto& tablet) -> future<> {
         auto [ tid, last_token ] = tablet;
         auto gid = locator::global_tablet_id{table, tid};
-        co_await transit_tablet(table, last_token, [&] (const locator::tablet_map& tmap, api::timestamp_type write_timestamp) {
-            utils::chunked_vector<canonical_mutation> updates;
-            updates.emplace_back(tablet_mutation_builder_for_base_table(write_timestamp, table)
-                .set_stage(last_token, locator::tablet_transition_stage::restore)
-                .set_new_replicas(last_token, tmap.get_tablet_info(tid).replicas)
-                .set_restore_config(last_token, locator::restore_config{ snap_name, endpoint, bucket })
-                .set_transition(last_token, locator::tablet_transition_kind::restore)
-                .build());
+        while (true) {
+            bool in_transition = false;
+            try {
+                co_await transit_tablet(table, last_token, [&] (const locator::tablet_map& tmap, api::timestamp_type write_timestamp) {
+                    utils::chunked_vector<canonical_mutation> updates;
+                    updates.emplace_back(tablet_mutation_builder_for_base_table(write_timestamp, table)
+                        .set_stage(last_token, locator::tablet_transition_stage::restore)
+                        .set_new_replicas(last_token, tmap.get_tablet_info(tid).replicas)
+                        .set_restore_config(last_token, locator::restore_config{ snap_name, endpoint, bucket })
+                        .set_transition(last_token, locator::tablet_transition_kind::restore)
+                        .build());
 
-            sstring reason = format("Restoring tablet {}", gid);
-            return std::make_tuple(std::move(updates), std::move(reason));
-        }, false);
-        wait.emplace_back(_topology_state_machine.event.wait([this, gid] {
-            auto& tmap = get_token_metadata().tablets().get_tablet_map(gid.table);
-            return !tmap.get_tablet_transition_info(gid.tablet);
-        }));
+                    sstring reason = format("Restoring tablet {}", gid);
+                    return std::make_tuple(std::move(updates), std::move(reason));
+                }, false);
+                break;
+
+            } catch (const std::runtime_error& e) {
+                // transit_tablet throws if the tablet is already in transition
+                // (e.g. load-balancing migration started by the topology coordinator).
+                // Wait for that transition to finish and retry.
+                rtlogger.debug("restore_tablets({}): {}, waiting for transition to finish", gid, e.what());
+                in_transition = true;
+            }
+            if (in_transition) {
+                co_await wait_transitions_done(gid);
+            }
+        }
+        wait.emplace_back(wait_transitions_done(gid));
     });
 
     co_await when_all_succeed(wait.begin(), wait.end()).discard_result();
