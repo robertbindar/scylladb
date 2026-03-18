@@ -934,14 +934,10 @@ async def test_restore_tablets_with_different_tablet_hints(build_mode: str, mana
 
         await check_mutation_replicas(cql, manager, servers, range(num_keys), topology, logger, ks, 'test')
 
-        # Verify that restore used the tablet hints from the backup manifest,
-        # not the ones set on the pre-restore table.
-        # FIXME: this check will be removed as it's irelevant after we implement the cleanup phase of tablet aware restore
-        # but the test will remain relevant as it was designed to fail if the restore code doesnt properly fix the tablet
-        # count to what was written in the backup manifest.
+        # Verify that restore altered the table back with the tablet hints set before restore started
         desc = (await cql.run_async(f"DESC TABLE {ks}.test"))[0].create_statement
-        assert f"'min_tablet_count': '{min_tablet_count}'" in desc, f"Expected min_tablet_count={min_tablet_count} in: {desc}"
-        assert f"'max_tablet_count': '{max_tablet_count}'" in desc, f"Expected max_tablet_count={max_tablet_count} in: {desc}"
+        assert f"'min_tablet_count': '{min_tablet_count*2}'" in desc, f"Expected min_tablet_count={min_tablet_count*2} in: {desc}"
+        assert f"'max_tablet_count': '{max_tablet_count*2}'" in desc, f"Expected max_tablet_count={max_tablet_count*2} in: {desc}"
 
 @pytest.mark.asyncio
 async def test_restore_with_non_existing_sstable(manager: ManagerClient, object_storage):
