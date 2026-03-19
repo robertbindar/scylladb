@@ -163,6 +163,10 @@ public:
     inline service::storage_proxy& get_storage_proxy() {
         return _sp;
     }
+
+    inline cql3::query_processor& get_query_processor() {
+        return _qp;
+    }
 private:
     future<> create_tables(std::vector<schema_ptr> tables);
 };
