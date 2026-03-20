@@ -1171,7 +1171,15 @@ protected:
     virtual future<> run() override {
         auto& loader = _loader.local();
 
-        co_await loader._ss.local().restore_tablets(_tid, _snap_name, _endpoint, _bucket);
+        std::exception_ptr eptr;
+        try {
+            co_await loader._ss.local().restore_tablets(_tid, _snap_name, _endpoint, _bucket);
+        } catch (...) {
+            llog.error("Failed to restore tablets for table_id {}. Error: {}", _tid, std::current_exception());
+            eptr = std::current_exception();
+        }
+
+        llog.info("Restoring table with tid {} to the original schema", _tid);
 
         // Get table schema from snapshot_cql_tables table and
         // call replica::alter_table_with_tablet_hints to restore the table schema to its original form
@@ -1193,6 +1201,10 @@ protected:
         // operation fail.
         co_await replica::alter_table_with_tablet_hints(current_schema, sys_dist_ks.get_storage_proxy(), sys_dist_ks.get_migration_manager(), loader._ss.local(),
                                                         *min_tablet_count, *max_tablet_count, false);
+
+        if (eptr) {
+            std::rethrow_exception(eptr);
+        }
 
         auto& db = loader._db.local();
         auto s = db.find_schema(_tid);
