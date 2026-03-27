@@ -1223,6 +1223,13 @@ protected:
 };
 
 future<tasks::task_id> sstables_loader::restore_tablets(table_id tid, sstring keyspace, sstring table, sstring snap_name, sstring endpoint, sstring bucket, utils::chunked_vector<sstring> manifests) {
+    if (this_shard_id() != 0) {
+        // group0 is only set on shard 0.
+        co_return co_await container().invoke_on(0, [&] (auto& ssloader) {
+            return ssloader.restore_tablets(tid, keyspace, table, snap_name, endpoint, bucket, manifests);
+        });
+    }
+
     auto tablet_count = co_await populate_snapshot_sstables_from_manifests(_storage_manager, _sys_dist_ks, keyspace, table, endpoint, bucket, snap_name, std::move(manifests));
 
     // Save the original schema of the table in system_distributed.snapshot_cql_table,
