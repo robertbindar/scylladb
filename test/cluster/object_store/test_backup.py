@@ -772,41 +772,53 @@ async def do_test_streaming_scopes(build_mode: str, manager: ManagerClient, topo
             if restored_min_tablet_count == original_min_tablet_count:
                 await check_streaming_directions(logger, servers, topology, host_ids, scope, pro, log_marks)
 
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("topology", [
-        topo(rf = 1, nodes = 3, racks = 1, dcs = 1),
-        topo(rf = 2, nodes = 2, racks = 2, dcs = 1),
+@pytest.mark.parametrize("topology, num_tables", [
+        (topo(rf = 1, nodes = 3, racks = 1, dcs = 1), 1),
+        (topo(rf = 1, nodes = 3, racks = 1, dcs = 1), 3),
+        (topo(rf = 2, nodes = 2, racks = 2, dcs = 1), 1),
+        (topo(rf = 2, nodes = 2, racks = 2, dcs = 1), 2),
     ])
-async def test_restore_tablets(build_mode: str, manager: ManagerClient, object_storage, topology):
-    '''Check that restoring of a cluster using tablet-aware restore works'''
+async def test_restore_tablets(build_mode: str, manager: ManagerClient, object_storage, topology, num_tables):
+    '''Check that tablet-aware restore works for multiple tables backed up from multiple nodes'''
 
     servers, host_ids = await create_cluster(topology, manager, logger, object_storage)
 
     cql = manager.get_cql()
 
     num_keys = 10
-    tablet_count=5
-    tablet_count_for_restore=8 # should be tablet_count rounded up to the power of two
+    tablet_count = 5
+    tablet_count_for_restore = 8  # should be tablet_count rounded up to the power of two
+    tables = [f'test{i}' for i in range(num_tables)]
 
+    # Create the keyspace, populate multiple tables, and back them all up
     async with new_test_keyspace(manager, f"WITH replication = {{'class': 'NetworkTopologyStrategy', 'replication_factor': {topology.rf}}}") as ks:
-        await cql.run_async(create_schema(ks, 'test', min_tablet_count=tablet_count))
-        insert_stmt = cql.prepare(f"INSERT INTO {ks}.test (pk, value) VALUES (?, ?)")
-        insert_stmt.consistency_level = ConsistencyLevel.ALL
-        await asyncio.gather(*(cql.run_async(insert_stmt, (str(i), i)) for i in range(num_keys)))
-        snap_name, sstables = await take_snapshot(ks, servers, manager, logger)
-        await asyncio.gather(*(do_backup(s, snap_name, f'{s.server_id}/{snap_name}', ks, 'test', object_storage, manager, logger) for s in servers))
+        async def create_table(cf):
+            await cql.run_async(create_schema(ks, cf, min_tablet_count=tablet_count))
+            insert_stmt = cql.prepare(f"INSERT INTO {ks}.{cf} (pk, value) VALUES (?, ?)")
+            insert_stmt.consistency_level = ConsistencyLevel.ALL
+            await asyncio.gather(*(cql.run_async(insert_stmt, (str(i), i)) for i in range(num_keys)))
 
+        await asyncio.gather(*(create_table(cf) for cf in tables))
+
+        snap_name, _ = await take_snapshot(ks, servers, manager, logger)
+
+        await asyncio.gather(*(do_backup(s, snap_name, f'{s.server_id}/{snap_name}/{cf}', ks, cf, object_storage, manager, logger) for cf in tables for s in servers))
+
+    # Restore all tables into a fresh keyspace
     async with new_test_keyspace(manager, f"WITH replication = {{'class': 'NetworkTopologyStrategy', 'replication_factor': {topology.rf}}}") as ks:
-        await cql.run_async(f"CREATE TABLE {ks}.test ( pk text primary key, value int ) WITH tablets = {{'min_tablet_count': {tablet_count_for_restore}, 'max_tablet_count': {tablet_count_for_restore}}};")
+        await asyncio.gather(*(cql.run_async(create_schema(ks, cf, min_tablet_count=tablet_count_for_restore, max_tablet_count=tablet_count_for_restore)) for cf in tables))
 
-        logger.info(f'Restore cluster via {servers[1].ip_addr}')
-        manifests = [ f'{s.server_id}/{snap_name}/manifest.json' for s in servers ]
-        tid = await manager.api.restore_tablets(servers[1].ip_addr, ks, 'test', snap_name, object_storage.address, object_storage.bucket_name, manifests)
-        status = await manager.api.wait_task(servers[1].ip_addr, tid)
-        assert (status is not None) and (status['state'] == 'done')
+        async def restore_table(cf):
+            logger.info(f'Restore table {cf} via {servers[1].ip_addr}')
+            manifests = [f'{s.server_id}/{snap_name}/{cf}/manifest.json' for s in servers]
+            tid = await manager.api.restore_tablets(servers[1].ip_addr, ks, cf, snap_name, object_storage.address, object_storage.bucket_name, manifests)
+            status = await manager.api.wait_task(servers[1].ip_addr, tid)
+            assert (status is not None) and (status['state'] == 'done'), f"Restore of {cf} failed: {status}"
 
-        await check_mutation_replicas(cql, manager, servers, range(num_keys), topology, logger, ks, 'test')
+        await asyncio.gather(*(restore_table(cf) for cf in tables))
+
+        await asyncio.gather(*(check_mutation_replicas(cql, manager, servers, range(num_keys), topology, logger, ks, cf) for cf in tables))
 
 @pytest.mark.asyncio
 @pytest.mark.skip_mode(mode='release', reason='error injections are not supported in release mode')
