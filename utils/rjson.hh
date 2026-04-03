@@ -248,6 +248,9 @@ inline std::string_view to_string_view(const rjson::value& v) {
 // for string conversion because it needs to scan the string
 // unnecessarily and GetStringLength could be used to avoid that.
 inline sstring to_sstring(const rjson::value& str) {
+    if (!str.IsString()) {
+        throw std::runtime_error("This function expects a JSON string value");
+    }
     return sstring(str.GetString(), str.GetStringLength());
 }
 inline std::string to_string(const rjson::value& str) {
@@ -255,10 +258,16 @@ inline std::string to_string(const rjson::value& str) {
 }
 // Helper for conversion to dht::token
 inline dht::token to_token(const rjson::value& v) {
+    if (!v.IsInt64()) {
+        throw std::runtime_error("This function expects the token value to be a 64-bit signed integer");
+    }
     return dht::token::from_int64(v.GetInt64());
 }
 // Helper for conversion to sstables::sstable_id
 inline sstables::sstable_id to_sstable_id(const rjson::value& v) {
+    if (!v.IsString()) {
+        throw std::runtime_error("This function expects the sstable_id value to be a string");
+    }
     return sstables::sstable_id(utils::UUID(rjson::to_string_view(v)));
 }
 // Returns a pointer to JSON member if it exists, nullptr otherwise
