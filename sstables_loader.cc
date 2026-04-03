@@ -1108,6 +1108,10 @@ static future<size_t> process_manifest(input_stream<char>& is, sstring keyspace,
 future<size_t> populate_snapshot_sstables_from_manifests(sstables::storage_manager& sm, db::system_distributed_keyspace& sys_dist_ks, sstring keyspace, sstring table, sstring endpoint, sstring bucket, sstring expected_snapshot_name, utils::chunked_vector<sstring> manifest_prefixes, db::consistency_level cl) {
     // Download manifests in parallel and populate system_distributed.snapshot_sstables
     // with the content extracted from each manifest
+    if (manifest_prefixes.empty()) {
+        throw std::invalid_argument("populate_snapshot_sstables_from_manifests requires at least one manifest prefix");
+    }
+
     auto client = sm.get_endpoint_client(endpoint);
 
     // tablet_count to be returned by this function, we also validate that all manifests passed contain the same tablet count
